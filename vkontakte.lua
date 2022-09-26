@@ -31,6 +31,7 @@ local ids = {}
 local allowed_urls = {}
 local item_user = nil
 local selected_images = {}
+local primary_url = nil
 
 local username = nil
 
@@ -75,33 +76,55 @@ processed = function(url)
   return false
 end
 
-discover_item = function(target, item)
+discover_item = function(target, shard, item)
   if string.match(item, "^u?r?l?:?http://[^/]*userapi%.com/.") then
     item = string.gsub(item, "^(u?r?l?:?)http://(.+)", "%1https://%2")
   end
-  if not target[item] then
-print('queuing' , item)
-    target[item] = true
+  local temp = string.match(item, "(.-)%s+2x$")
+  if temp then
+    item = temp
+  end
+  if not target[shard] then
+    target[shard] = {}
+  end
+  if not target[shard][item] then
+--print("queuing" , item, "to", shard)
+    target[shard][item] = true
   end
 end
 
 allowed = function(url, parenturl)
   if allowed_urls[url]
     or url == "https://vk.com/al_photos.php?act=show"
-    or url == "https://vk.com/al_video.php?act=video_box" then
+    or url == "https://vk.com/al_video.php?act=video_box"
+    or url == "https://vk.com/wkview.php?act=show" then
     return true
   end
 
   if string.match(url, "^https?://m%.vk%.com/")
     or string.match(url, "[%?&]lang=")
     or string.match(url, "[%?&]offset=")
-    or (string.match(url, "%?reply=") and not string.match(url, "&thread=")) then
+    or (
+      string.match(url, "wall%-?[0-9]+_([0-9]+)") == item_value
+      and string.match(url, "%?reply=")
+      and not string.match(url, "&thread=")
+    )
+    or (
+      item_type == "id"
+      and (
+        string.match(url, "/album%-?[0-9]+_[0-9]+")
+        or string.match(url, "/video%-?[0-9]+_[0-9]+")
+        or string.match(url, "/wall%-?[0-9]+_[0-9]+")
+        or string.match(url, "/topic%-?[0-9]+_[0-9]+")
+        or string.match(url, "/photo%-?[0-9]+_[0-9]+")
+      )
+    ) then
     return false
   end
 
   local article = string.match(url, "^https?://vk%.com/@([^%?&]+)")
   if article then
-    discover_item(discovered_items, "article:" .. article)
+    discover_item(discovered_items, "", "article:" .. article)
     return false
   end
 
@@ -114,12 +137,12 @@ allowed = function(url, parenturl)
     if not outlink then
       return false
     end
-    discover_item(discovered_outlinks, urlparse.unescape(outlink))
+    discover_item(discovered_outlinks, "", urlparse.unescape(outlink))
     return true
   end
 
   if string.match(url, "^https?://[^/]*userapi%.com/.") then
-    discover_item(discovered_items, "url:" .. url)
+    discover_item(discovered_items, "images", "url:" .. url)
     return false
   end
 
@@ -146,6 +169,9 @@ find_item = function(url)
   local value = string.match(url, "^https?://vk%.com/id(%-?[0-9]+)$")
   if not value then
     value = string.match(url, "^https?://vk%.com/public(%-?[0-9]+)$")
+    if value and not string.match(value, "^%-") then
+      value = "-" .. value
+    end
   end
   local type_ = "id"
   local user = nil
@@ -164,6 +190,7 @@ find_item = function(url)
     item_value_match = string.gsub(item_value, "%-", "%%%-")
     item_user = user
     item_user_match = nil
+    primary_url = url
     if item_user then
       item_name_new = item_type .. ":" .. item_user .. ":" .. item_value
       item_user_match = string.gsub(item_user, "%-", "%%%-")
@@ -189,7 +216,13 @@ wget.callbacks.download_child_p = function(urlpos, parent, depth, start_url_pars
   local url = urlpos["url"]["url"]
   local html = urlpos["link_expect_html"]
 
-  if abortgrab then
+  if status_code >= 300 and parent["url"] == primary_url then
+    return true
+  end
+
+  if abortgrab
+    or string.match(url, "/[^%?]+%?w=wall%-?[0-9]+_[0-9]+$")
+    or string.match(url, "/away%.php%?") then
     return false
   end
 
@@ -198,9 +231,9 @@ wget.callbacks.download_child_p = function(urlpos, parent, depth, start_url_pars
       return true
     end
   elseif string.match(url, "^https?://[^/]*userapi%.com/.") then
-    discover_item(discovered_items, "url:" .. url)
+    discover_item(discovered_items, "images", "url:" .. url)
   elseif not string.match(url, "^https?://m?%.?vk%.com/") then
-    discover_item(discovered_outlinks, url)
+    discover_item(discovered_outlinks, "", url)
   end
 
   return false
@@ -209,7 +242,7 @@ end
 wget.callbacks.get_urls = function(file, url, is_css, iri)
   local urls = {}
   local html = nil
-  
+
   downloaded[url] = true
 
   if abortgrab then
@@ -301,6 +334,7 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
   local function xml_post_request(url, body_data)
     local representation = url .. body_data
     if not processed(representation) then
+      print("requesting", url, body_data)
       table.insert(urls, {
         url=url,
         method="POST",
@@ -316,8 +350,12 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
 
   if allowed(url) and status_code < 300 then
     html = read_file(file)
-    if item_type == "id" and string.match(url, "^https?://vk%.com/[a-z]+%-?[0-9]+$") then
-      local newurl = string.match(html, '<link%s+rel="canonical"%s+href="(https://vk.com/[^"]+)"%s*/>')
+    if item_type == "id"
+      and (
+        string.match(url, "^https?://vk%.com/public%-?[0-9]+$")
+        or string.match(url, "^https?://vk%.com/id%-?[0-9]+$")
+      ) then
+      local newurl = string.match(html, '<link%s+rel="canonical"%s+href="(https?://vk%.com/[^"]+)"%s*/>')
       username = string.match(newurl, "^https?://vk%.com/(.+)$")
       check(newurl)
       newurl = string.match(html, '<meta%s+property="og:url"%s+content="([^"]+)"')
@@ -325,7 +363,7 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
         check(newurl)
       end
       local max_id = 0
-      for wall_id in string.gmatch(html, "https?://vk%.com/wall" .. item_value_match .. "_([0-9]+)$") do
+      for wall_id in string.gmatch(html, "/wall" .. item_value_match .. "_([0-9]+)") do
         wall_id = tonumber(wall_id)
         if wall_id > max_id then
           max_id = wall_id
@@ -333,7 +371,7 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
       end
       if max_id > 0 then
         for i=0,max_id do
-          discover_item(discovered_items, "wall:" .. item_value .. ":" .. tostring(i))
+          discover_item(discovered_items, "", "wall:" .. item_value .. ":" .. tostring(i))
         end
       end
       for data in string.gmatch(html, '<div%s+class="post_image_stories">%s*<img([^>]+)>%s*</div>') do
@@ -345,8 +383,8 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
       end
     end
     if item_type == "wall" then
-      if string.match(html, '"og:image:secure_url"') then
-        html = string.gsub(html, '<meta%s+property="og:image"[^>]+>', '')
+      if string.match(url, "/[^%?]+%?w=wall%-?[0-9]+_[0-9]+$") then
+        return urls
       end
       if url == "https://vk.com/al_video.php?act=video_box" then
         local data = JSON:decode(html)
@@ -370,12 +408,10 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
         end
         return urls
       end
-print(url)
       if url == "https://vk.com/al_photos.php?act=show" then
         for image_url, _ in pairs(selected_images) do
           image_url = string.gsub(image_url, "([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
           image_url = string.gsub(image_url, "/", "\\/")
-          print(image_url)
           if not string.match(html, image_url) then
             io.stdout:write("Could not find selected high quality image in image data.\n")
             io.stdout:flush()
@@ -407,11 +443,38 @@ print(url)
         check(newurl)
         check(newurl .. "&bytes=0-" .. indexrange_max)
       end
-      if string.match(url, "/wall%-?[0-9]+_[0-9]+$")
-        or string.match(url, "/photo%-?[0-9]+_[0-9]+$") then
+      if string.match(url, "/wall%-?[0-9]+_[0-9]+") then
+        local author_data = string.match(html, '<a%s+(class="author"[^>]+)>')
+        if not author_data then
+          if string.match(html, '<div%s+class="message_page_title">Error</div>')
+            and string.match(html, '<div%s+class="message_page_body">%s*Post%s+not%s+found') then
+            return urls
+          end
+          io.stdout:write("No author data found.\n")
+          io.stdout:flush()
+          abort_grab()
+        end
+        local data_from_id = string.match(author_data, 'data%-from%-id="(%-?[0-9]+)"')
+        if data_from_id == item_user then
+          local author_slug = string.match(author_data, 'href="/([^"/]+)"')
+          local wall_id = string.match(url, "/(wall%-?[0-9]+_[0-9]+)")
+          check("https://vk.com/" .. author_slug .. "?w=" .. wall_id)
+          xml_post_request(
+            "https://vk.com/wkview.php?act=show",
+            "act=show"
+            .. "&al=1"
+            .. "&dmcah="
+            .. "&loc=" .. author_slug
+            .. "&location_owner_id=" .. data_from_id
+            .. "&ref="
+            .. "&w=" .. wall_id
+          )
+        end
+      end
+      if string.match(url, "/wall%-?[0-9]+_[0-9]+")
+        or string.match(url, "/photo%-?[0-9]+_[0-9]+") then
         for image_data in string.gmatch(html, 'showPhoto%(([^%)]+), event%)') do
           image_data = string.gsub(image_data, "&quot;", '"')
-print(image_data)
           local image_id, wall_id, image_json = string.match(image_data, "'(%-?[0-9]+_[0-9]+)',%s*'(wall%-?[0-9]+_[0-9]+)',%s*({.+})%s*$")
           if not image_json then
             io.stdout:write("No image data found.\n")
@@ -419,34 +482,45 @@ print(image_data)
             abort_item()
             return urls
           end
-          if string.match(url, "/wall") then
-            xml_post_request(
-              "https://vk.com/al_photos.php?act=show",
-              "act=show" .. 
-                "&al=1" .. 
-                "&al_ad=0" .. 
-                "&dmcah=" ..
-                "&list=" .. wall_id .. 
-                "&module=wall" ..
-                "&photo=" .. image_id
-            )
-            check(url .. "?z=photo" .. image_id .. "%2F" .. wall_id)
-            check("https://vk.com/photo-17315087_457275730")
-          elseif string.match(url, "/photo(%-?[0-9]+_[0-9]+)$") == image_id then
-            xml_post_request(
-              "https://vk.com/al_photos.php?act=show",
-              "act=show" .. 
-                "&al=1" .. 
-                "&dmcah=" ..
-                "&list=" .. wall_id .. "%2Frev" ..
-                "&module=photos" ..
-                "&photo=" .. image_id
-            )
+          if wall_id == "wall" .. item_user .. "_" .. item_value then
+            ids[string.match(image_id, "([0-9]+)$")] = true
+            if string.match(url, "/wall") then
+              xml_post_request(
+                "https://vk.com/al_photos.php?act=show",
+                "act=show"
+                .. "&al=1"
+                .. "&al_ad=0"
+                .. "&dmcah="
+                .. "&list=" .. wall_id
+                .. "&module=wall"
+                .. "&photo=" .. image_id
+              )
+              check("https://vk.com/photo" .. image_id)
+              if not string.match(url, "[%?&]z=photo") then
+                local newurl = url
+                if string.match(newurl, "%?") then
+                  newurl = newurl .. "&"
+                else
+                  newurl = newurl .. "?"
+                end
+                newurl = newurl .. "z=photo" .. image_id .. "%2F" .. wall_id
+                check(newurl)
+              end
+            elseif string.match(url, "/photo(%-?[0-9]+_[0-9]+)$") == image_id then
+              xml_post_request(
+                "https://vk.com/al_photos.php?act=show",
+                "act=show"
+                .. "&al=1"
+                .. "&dmcah="
+                .. "&list=" .. wall_id .. "%2Frev"
+                .. "&module=photos"
+                .. "&photo=" .. image_id
+              )
+            end
           end
         end
       elseif string.match(url, "%?z=photo") then
         local data = string.match(html, '%(({"zFields".-})%)')
-print(data)
         if not data then
           io.stdout:write("No photo data with zFields found.\n")
           io.stdout:flush()
@@ -504,24 +578,24 @@ print(data)
           end
           xml_post_request(
             "https://vk.com/al_video.php?act=video_box",
-            "al=1" ..
-              "&autoplay=" .. video_json["autoplay"] ..
-              "&autoplay_sound=0" .. 
-              "&from_autoplay=1" .. 
-              "&list=" .. video_list .. 
-              "&module=wall" ..
-              "&post_id=" .. video_json["addParams"]["post_id"] ..
-              "&stretch_vertical=0" .. 
-              "&video=" .. video_id
+            "al=1"
+            .. "&autoplay=" .. video_json["autoplay"]
+            .. "&autoplay_sound=0"
+            .. "&from_autoplay=1"
+            .. "&list=" .. video_list
+            .. "&module=wall"
+            .. "&post_id=" .. video_json["addParams"]["post_id"]
+            .. "&stretch_vertical=0"
+            .. "&video=" .. video_id
           )
           xml_post_request(
             "https://vk.com/al_video.php?act=video_box",
-            "al=1" ..
-              "&autoplay=" .. video_json["autoplay"] ..
-              "&list=" .. video_list .. 
-              "&module=wall" ..
-              "&post_id=" .. video_json["addParams"]["post_id"] ..
-              "&video=" .. video_id
+            "al=1"
+            .. "&autoplay=" .. video_json["autoplay"]
+            .. "&list=" .. video_list
+            .. "&module=wall"
+            .. "&post_id=" .. video_json["addParams"]["post_id"]
+            .. "&video=" .. video_id
           )
         end
       end
@@ -556,7 +630,7 @@ end
 
 wget.callbacks.httploop_result = function(url, err, http_stat)
   status_code = http_stat["statcode"]
-  
+
   url_count = url_count + 1
   io.stdout:write(url_count .. "=" .. status_code .. " " .. url["url"] .. " \n")
   io.stdout:flush()
@@ -569,12 +643,23 @@ wget.callbacks.httploop_result = function(url, err, http_stat)
 
   if status_code >= 300 and status_code <= 399 then
     local newloc = urlparse.absolute(url["url"], http_stat["newloc"])
+    if not string.match(newloc, "%?reply=")
+      and not string.match(newloc, "^https?://away%.vk%.com/")
+      and not string.match(newloc, "^https?://login%.vk%.com/%?")
+      and not string.match(newloc, "^https?://vk%.com/login%.php%?")
+      and not string.match(newloc, "^https?://vk%.com/login%?")
+      and string.match(url["url"], "^https?://[^/]+/([^/%?&;]+)") ~= string.match(newloc, "^https?://[^/]+/([^/%?&;]+)") then
+      io.stdout:write("Found odd redirect.\n")
+      io.stdout:flush()
+      abort_item()
+      return wget.actions.EXIT
+    end
     if processed(newloc) or not allowed(newloc, url["url"]) then
       tries = 0
       return wget.actions.EXIT
     end
   end
-  
+
   if status_code == 200 then
     downloaded[url["url"]] = true
     downloaded[string.gsub(url["url"], "https?://", "http://")] = true
@@ -610,15 +695,19 @@ wget.callbacks.httploop_result = function(url, err, http_stat)
 end
 
 wget.callbacks.finish = function(start_time, end_time, wall_time, numurls, total_downloaded_bytes, total_download_time)
-  local function submit_backfeed(items, key)
+  local function submit_backfeed(items, key, shard)
     local tries = 0
     local maxtries = 4
+    local parameters = ""
+    if shard ~= "" then
+      parameters = "?shard=" .. shard
+    end
     while tries < maxtries do
       if killgrab then
         return false
       end
       local body, code, headers, status = http.request(
-        "https://legacy-api.arpa.li/backfeed/legacy/" .. key,
+        "https://legacy-api.arpa.li/backfeed/legacy/" .. key .. parameters,
         items .. "\0"
       )
       if code == 200 and body ~= nil and JSON:decode(body)["status_code"] == 200 then
@@ -643,27 +732,29 @@ wget.callbacks.finish = function(start_time, end_time, wall_time, numurls, total
   file:close()
   for key, data in pairs({
     ["urls-ajsy1kcax4kmzsu"] = discovered_outlinks,
-    ["urls-ajsy1kcax4kmzsu"] = discovered_outlinks
+    ["vkontakte-y6v8h27ero5j7v0"] = discovered_items
   }) do
-    print('queuing for', string.match(key, "^(.+)%-"))
-    local items = nil
-    local count = 0
-    for item, _ in pairs(data) do
-      print("found item", item)
-      if items == nil then
-        items = item
-      else
-        items = items .. "\0" .. item
+    for shard, urls_data in pairs(data) do
+      print("queuing for", string.match(key, "^(.+)%-"), "on shard", shard)
+      local items = nil
+      local count = 0
+      for item, _ in pairs(urls_data) do
+        print("found item", item)
+        if items == nil then
+          items = item
+        else
+          items = items .. "\0" .. item
+        end
+        count = count + 1
+        if count == 100 then
+          submit_backfeed(items, key, shard)
+          items = nil
+          count = 0
+        end
       end
-      count = count + 1
-      if count == 100 then
-        submit_backfeed(items, key)
-        items = nil
-        count = 0
+      if items ~= nil then
+        submit_backfeed(items, key, shard)
       end
-    end
-    if items ~= nil then
-      submit_backfeed(items, key)
     end
   end
 end
