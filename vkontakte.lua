@@ -201,8 +201,8 @@ find_item = function(url)
       ids = {}
       username = nil
       ids[value] = true
-      if string.match(value, "%-.") then
-        ids[string.match(value, "^.(.+)$")] = true
+      if string.match(value, "^%-.") then
+        ids[string.match(value, "^-(.+)$")] = true
       end
       abortgrab = false
       tries = 0
@@ -269,6 +269,7 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
     end
     if not processed(url_)
       and allowed(url_, origurl) then
+print(url_)
       table.insert(urls, { url=url_ })
       addedtolist[url_] = true
       addedtolist[url] = true
@@ -348,8 +349,16 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
     end
   end
 
-  if allowed(url) and status_code < 300 then
+  local function check_sig(url)
+    ids[string.match(url, "[%?&]sig=([^&]+)")] = true
+    check(url)
+  end
+
+  if allowed(url) and status_code < 300
+    and not string.match(url, "^https?://[^/]*userapi%.com/") then
     html = read_file(file)
+
+    -- ACCOUNT/GROUP
     if item_type == "id"
       and (
         string.match(url, "^https?://vk%.com/public%-?[0-9]+$")
@@ -382,47 +391,98 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
         end
       end
     end
+
+    -- POST
     if item_type == "wall" then
       if string.match(url, "/[^%?]+%?w=wall%-?[0-9]+_[0-9]+$") then
         return urls
       end
+
+      -- POST DOCUMENTS
+      if allowed_urls[url] and string.match(url, "%?extra=") then
+        local newurl = string.match(url, "^([^%?]+)")
+        allowed_urls[newurl] = true
+        check(newurl)
+      end
+      if string.match(url, "^https?://vk%.com/doc%-?[0-9]+_[0-9]+") then
+        check(string.match(url, "^([^%?]+)"))
+        for d in string.gmatch(html, "Docs%.initDoc%(({.-})%);") do
+          local json = JSON:decode(d)
+          local newurl = json["docUrl"]
+          allowed_urls[newurl] = true
+          check(newurl)
+        end
+      end
+      for d in string.gmatch(html, '(<div%s+class="page_doc_row"%s+id="post_media_lnk[^"]+">.-</div>)') do
+        local post_media_lnk = string.match(d, 'post_media_lnk(%-?[0-9]+_[0-9]+)')
+        local doc_href = string.match(d, 'href="(/doc[^"]+)"')
+        if post_media_lnk == item_user .. "_" .. item_value then
+          doc_href = urlparse.absolute(url, doc_href)
+          local doc_id = string.match(doc_href, "/doc%-?[0-9]+_([0-9]+)")
+          ids[doc_id] = true
+          check(doc_href)
+          check(string.match(doc_href, "^([^%?]+)"))
+        end
+      end
+
+      -- POST VIDEO
       if url == "https://vk.com/al_video.php?act=video_box" then
         local data = JSON:decode(html)
+        local found = false
         for _, d in pairs(data["payload"]) do
-          if d["player"] then
-            local params = d["player"]["params"]
-            local params_count = 0
-            for _, d in pairs(params) do
-              params_count = params_count + 1
+          if type(d) == "table" then
+            for _, e in pairs(d) do
+              if type(e) == "table" and e["player"] then
+                local params = e["player"]["params"]
+                local params_count = 0
+                for _ in pairs(params) do
+                  params_count = params_count + 1
+                end
+                if params_count ~= 1 then
+                  io.stdout:write("There should only be one parameter in the video player data.\n")
+                  io.stdout:flush()
+                  abort_item()
+                  return {}
+                end
+                found = true
+                local newurl = params[1]["dash_uni"]
+                check_sig(newurl)
+                check(params[1]["author_photo"])
+                check(params[1]["jpg"])
+                local max_pixels = 0
+                local max_url = nil
+                for k, v in pairs(params[1]) do
+                  local pixels = tonumber(string.match(k, "^url([0-9]+)$"))
+                  if pixels and pixels > max_pixels then
+                    max_pixels = pixels
+                    max_url = v
+                  end
+                end
+                if not max_url then
+                  io.stdout:write("Could not find regular max size video URL.\n")
+                  io.stdout:flush()
+                  abort_item()
+                  return {}
+                end
+print(max_url, 'CHECK')
+                check_sig(max_url)
+              end
             end
-            if params_count ~= 1 then
-              io.stdout:write("There should only be one parameter in the video player data.\n")
-              io.stdout:flush()
-              abort_item()
-              return {}
-            end
-            local newurl = params[0]["dash_uni"]
-            ids[string.match(newurl, "[%?&]sig=([^&]+)")] = true
-            queue(newurl)
           end
         end
-        return urls
-      end
-      if url == "https://vk.com/al_photos.php?act=show" then
-        for image_url, _ in pairs(selected_images) do
-          image_url = string.gsub(image_url, "([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
-          image_url = string.gsub(image_url, "/", "\\/")
-          if not string.match(html, image_url) then
-            io.stdout:write("Could not find selected high quality image in image data.\n")
-            io.stdout:flush()
-          end
+        if not found then
+          io.stdout:write("Could not find video data in video response.\n")
+          io.stdout:flush()
+          abort_item()
+          return {}
         end
         return urls
       end
       local sig = string.match(url, "[%?&]sig=([^&]+)")
-      if sig and ids[sig] then
+      if sig and ids[sig] and string.match(url, "[%?&]type=2") then
         local max_bandwidth = 0
         local max_data = nil
+print(html)
         for data in string.gmatch(html, "(<Representation.-</Representation>)") do
           local bandwidth = tonumber(string.match(data, 'bandwidth="([0-9]+)"'))
           if bandwidth > max_bandwidth then
@@ -436,43 +496,73 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
           abort_item()
           return urls
         end
-        local baseurl = string.gsub(string.match(data, "<BaseURL>(.-)</BaseURL>"), "&amp;", "&")
-        local indexrange_max = string.match(data, 'indexRange="[0-9]+%-([0-9]+)"')
+        local baseurl = string.gsub(string.match(max_data, "<BaseURL>(.-)</BaseURL>"), "&amp;", "&")
+        local indexrange_max = string.match(max_data, 'indexRange="[0-9]+%-([0-9]+)"')
         local newurl = urlparse.absolute(url, baseurl)
-        ids[string.match(newurl, "[%?&]sig=([^&]+)")] = true
-        check(newurl)
+        check_sig(newurl)
         check(newurl .. "&bytes=0-" .. indexrange_max)
       end
-      if string.match(url, "/wall%-?[0-9]+_[0-9]+") then
-        local author_data = string.match(html, '<a%s+(class="author"[^>]+)>')
-        if not author_data then
-          if string.match(html, '<div%s+class="message_page_title">Error</div>')
-            and string.match(html, '<div%s+class="message_page_body">%s*Post%s+not%s+found') then
+      for video_data in string.gmatch(html, 'onclick="return%s+showVideo%(([^%)]+), event, this%);"') do
+        video_data = string.gsub(video_data, "&quot;", '"')
+        local video_id, video_list, video_json = string.match(video_data, '"([^"]+)",%s*"([^"]+)",%s*({.+})$')
+        if not video_json then
+          io.stdout:write("No video JSON data found.\n")
+          io.stdout:flush()
+          abort_item()
+          return urls
+        end
+        video_json = JSON:decode(video_json)
+        if video_json["addParams"]["post_id"] == item_user .. "_" .. item_value then
+          local items_count = 0
+          for k, v in pairs(video_json["addParams"]) do
+            items_count = items_count + 1
+          end
+          if items_count > 1 then
+            io.stdout:write("More than a single addParams parameter found for video.\n")
+            io.stdout:flush()
+            abort_item()
             return urls
           end
-          io.stdout:write("No author data found.\n")
-          io.stdout:flush()
-          abort_grab()
-        end
-        local data_from_id = string.match(author_data, 'data%-from%-id="(%-?[0-9]+)"')
-        if data_from_id == item_user then
-          local author_slug = string.match(author_data, 'href="/([^"/]+)"')
-          local wall_id = string.match(url, "/(wall%-?[0-9]+_[0-9]+)")
-          check("https://vk.com/" .. author_slug .. "?w=" .. wall_id)
           xml_post_request(
-            "https://vk.com/wkview.php?act=show",
-            "act=show"
-            .. "&al=1"
-            .. "&dmcah="
-            .. "&loc=" .. author_slug
-            .. "&location_owner_id=" .. data_from_id
-            .. "&ref="
-            .. "&w=" .. wall_id
+            "https://vk.com/al_video.php?act=video_box",
+            "al=1"
+            .. "&autoplay=" .. video_json["autoplay"]
+            .. "&autoplay_sound=0"
+            .. "&from_autoplay=1"
+            .. "&list=" .. video_list
+            .. "&module=wall"
+            .. "&post_id=" .. video_json["addParams"]["post_id"]
+            .. "&stretch_vertical=0"
+            .. "&video=" .. video_id
+          )
+          xml_post_request(
+            "https://vk.com/al_video.php?act=video_box",
+            "al=1"
+            .. "&autoplay=" .. video_json["autoplay"]
+            .. "&list=" .. video_list
+            .. "&module=wall"
+            .. "&post_id=" .. video_json["addParams"]["post_id"]
+            .. "&video=" .. video_id
           )
         end
       end
+
+      -- POST PHOTOS
+      if url == "https://vk.com/al_photos.php?act=show" then
+        
+
+        for image_url, _ in pairs(selected_images) do
+          image_url = string.gsub(image_url, "([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
+          image_url = string.gsub(image_url, "/", "\\/")
+          if not string.match(html, image_url) then
+            io.stdout:write("Could not find selected high quality image in image data.\n")
+            io.stdout:flush()
+          end
+        end
+        return urls
+      end
       if string.match(url, "/wall%-?[0-9]+_[0-9]+")
-        or string.match(url, "/photo%-?[0-9]+_[0-9]+") then
+        --[[or string.match(url, "/photo%-?[0-9]+_[0-9]+")]] then
         for image_data in string.gmatch(html, 'showPhoto%(([^%)]+), event%)') do
           image_data = string.gsub(image_data, "&quot;", '"')
           local image_id, wall_id, image_json = string.match(image_data, "'(%-?[0-9]+_[0-9]+)',%s*'(wall%-?[0-9]+_[0-9]+)',%s*({.+})%s*$")
@@ -555,51 +645,39 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
       if string.match(url, "/photo%-?[0-9]+_[0-9]+$") then
         check(url .. "?rev=1")
       end
-      for video_data in string.gmatch(html, 'onclick="return%s+showVideo%(([^%)]+), event, this%);"') do
-        video_data = string.gsub(video_data, "&quot;", '"')
-        local video_id, video_list, video_json = string.match(video_data, '"([^"]+)",%s*"([^"]+)",%s*({.+})$')
-        if not video_json then
-          io.stdout:write("No video JSON data found.\n")
-          io.stdout:flush()
-          abort_item()
-          return urls
-        end
-        video_json = JSON:decode(video_json)
-        if video_json["addParams"]["post_id"] == item_user .. "_" .. item_value then
-          local items_count = 0
-          for k, v in pairs(video_json["addParams"]) do
-            items_count = items_count + 1
-          end
-          if items_count > 1 then
-            io.stdout:write("More than a single addParams parameter found for video.\n")
-            io.stdout:flush()
-            abort_item()
+
+      -- POST HTML
+      if string.match(url, "/wall%-?[0-9]+_[0-9]+") then
+        local author_data = string.match(html, '<a%s+(class="author"[^>]+)>')
+        if not author_data then
+          if string.match(html, '<div%s+class="message_page_title">Error</div>')
+            and string.match(html, '<div%s+class="message_page_body">%s*Post%s+not%s+found') then
             return urls
           end
+          io.stdout:write("No author data found.\n")
+          io.stdout:flush()
+          abort_grab()
+        end
+        local data_from_id = string.match(author_data, 'data%-from%-id="(%-?[0-9]+)"')
+        if data_from_id == item_user then
+          local author_slug = string.match(author_data, 'href="/([^"/]+)"')
+          local wall_id = string.match(url, "/(wall%-?[0-9]+_[0-9]+)")
+          check("https://vk.com/" .. author_slug .. "?w=" .. wall_id)
           xml_post_request(
-            "https://vk.com/al_video.php?act=video_box",
-            "al=1"
-            .. "&autoplay=" .. video_json["autoplay"]
-            .. "&autoplay_sound=0"
-            .. "&from_autoplay=1"
-            .. "&list=" .. video_list
-            .. "&module=wall"
-            .. "&post_id=" .. video_json["addParams"]["post_id"]
-            .. "&stretch_vertical=0"
-            .. "&video=" .. video_id
-          )
-          xml_post_request(
-            "https://vk.com/al_video.php?act=video_box",
-            "al=1"
-            .. "&autoplay=" .. video_json["autoplay"]
-            .. "&list=" .. video_list
-            .. "&module=wall"
-            .. "&post_id=" .. video_json["addParams"]["post_id"]
-            .. "&video=" .. video_id
+            "https://vk.com/wkview.php?act=show",
+            "act=show"
+            .. "&al=1"
+            .. "&dmcah="
+            .. "&loc=" .. author_slug
+            .. "&location_owner_id=" .. data_from_id
+            .. "&ref="
+            .. "&w=" .. wall_id
           )
         end
       end
     end
+
+    -- GENERAL
     for newurl in string.gmatch(string.gsub(html, "&quot;", '"'), '([^"]+)') do
       checknewurl(newurl)
     end
@@ -648,11 +726,15 @@ wget.callbacks.httploop_result = function(url, err, http_stat)
       and not string.match(newloc, "^https?://login%.vk%.com/%?")
       and not string.match(newloc, "^https?://vk%.com/login%.php%?")
       and not string.match(newloc, "^https?://vk%.com/login%?")
+      and not string.match(newloc, "^https?://[^/]*userapi%.com/")
       and string.match(url["url"], "^https?://[^/]+/([^/%?&;]+)") ~= string.match(newloc, "^https?://[^/]+/([^/%?&;]+)") then
       io.stdout:write("Found odd redirect.\n")
       io.stdout:flush()
       abort_item()
       return wget.actions.EXIT
+    end
+    if string.match(url["url"], "^https?://vk%.com/doc%-?[0-9]+_[0-9]+") then
+      allowed_urls[newloc] = true
     end
     if processed(newloc) or not allowed(newloc, url["url"]) then
       tries = 0
@@ -670,9 +752,7 @@ wget.callbacks.httploop_result = function(url, err, http_stat)
     return wget.actions.EXIT
   end
 
-  if (status_code == 0 or status_code >= 400)
-    and status_code ~= 404
-    and status_code ~= 403 then
+  if status_code == 0 or status_code >= 400 then
     io.stdout:write("Server returned bad response. Sleeping.\n")
     io.stdout:flush()
     local maxtries = 10
@@ -690,6 +770,8 @@ wget.callbacks.httploop_result = function(url, err, http_stat)
   end
 
   tries = 0
+
+print(url["url"])
 
   return wget.actions.NOTHING
 end
