@@ -30,6 +30,7 @@ local bad_items = {}
 local ids = {}
 local allowed_urls = {}
 local item_user = nil
+local selected_images = {}
 
 local username = nil
 
@@ -75,20 +76,32 @@ processed = function(url)
 end
 
 discover_item = function(target, item)
-print('queuing' , item)
+  if string.match(item, "^u?r?l?:?http://[^/]*userapi%.com/.") then
+    item = string.gsub(item, "^(u?r?l?:?)http://(.+)", "%1https://%2")
+  end
   if not target[item] then
+print('queuing' , item)
     target[item] = true
   end
 end
 
 allowed = function(url, parenturl)
-  if allowed_urls[url] then
+  if allowed_urls[url]
+    or url == "https://vk.com/al_photos.php?act=show"
+    or url == "https://vk.com/al_video.php?act=video_box" then
     return true
+  end
+
+  if string.match(url, "^https?://m%.vk%.com/")
+    or string.match(url, "[%?&]lang=")
+    or string.match(url, "[%?&]offset=")
+    or (string.match(url, "%?reply=") and not string.match(url, "&thread=")) then
+    return false
   end
 
   local article = string.match(url, "^https?://vk%.com/@([^%?&]+)")
   if article then
-    discovered_items["article:" .. article] = true
+    discover_item(discovered_items, "article:" .. article)
     return false
   end
 
@@ -98,12 +111,15 @@ allowed = function(url, parenturl)
 
   if string.match(url, "/away%.php") then
     local outlink = string.match(url, "[%?&]to=([^&]+)")
-    discovered_outlinks[urlparse.unescape(outlink)] = true
+    if not outlink then
+      return false
+    end
+    discover_item(discovered_outlinks, urlparse.unescape(outlink))
     return true
   end
 
   if string.match(url, "^https?://[^/]*userapi%.com/.") then
-    discovered_items[url] = true
+    discover_item(discovered_items, "url:" .. url)
     return false
   end
 
@@ -113,7 +129,13 @@ allowed = function(url, parenturl)
     end
   end
 
-  if string.match(url, "^https?://vk%.com/(.+)$") == username then
+  for s in string.gmatch(url, "([0-9]+)") do
+    if ids[s] then
+      return true
+    end
+  end
+
+  if username and string.match(url, "^https?://vk%.com/(.+)$") == username then
     return true
   end
 
@@ -122,6 +144,9 @@ end
 
 find_item = function(url)
   local value = string.match(url, "^https?://vk%.com/id(%-?[0-9]+)$")
+  if not value then
+    value = string.match(url, "^https?://vk%.com/public(%-?[0-9]+)$")
+  end
   local type_ = "id"
   local user = nil
   if not value then
@@ -149,6 +174,9 @@ find_item = function(url)
       ids = {}
       username = nil
       ids[value] = true
+      if string.match(value, "%-.") then
+        ids[string.match(value, "^.(.+)$")] = true
+      end
       abortgrab = false
       tries = 0
       item_name = item_name_new
@@ -161,12 +189,18 @@ wget.callbacks.download_child_p = function(urlpos, parent, depth, start_url_pars
   local url = urlpos["url"]["url"]
   local html = urlpos["link_expect_html"]
 
+  if abortgrab then
+    return false
+  end
+
   if allowed(url, parent["url"]) then
     if not processed(url) then
       return true
     end
-  else
-    discovered_outlinks[url] = true
+  elseif string.match(url, "^https?://[^/]*userapi%.com/.") then
+    discover_item(discovered_items, "url:" .. url)
+  elseif not string.match(url, "^https?://m?%.?vk%.com/") then
+    discover_item(discovered_outlinks, url)
   end
 
   return false
@@ -264,12 +298,32 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
     check(newurl)
   end
 
+  local function xml_post_request(url, body_data)
+    local representation = url .. body_data
+    if not processed(representation) then
+      table.insert(urls, {
+        url=url,
+        method="POST",
+        body_data=body_data,
+        headers={
+          ["X-Requested-With"]="XMLHttpRequest",
+          ["Content-Type"]="application/x-www-form-urlencoded"
+        }
+      })
+      addedtolist[representation] = true
+    end
+  end
+
   if allowed(url) and status_code < 300 then
     html = read_file(file)
-    if item_type == "id" and string.match(url, "^https?://vk%.com/id%-?[0-9]+$") then
+    if item_type == "id" and string.match(url, "^https?://vk%.com/[a-z]+%-?[0-9]+$") then
       local newurl = string.match(html, '<link%s+rel="canonical"%s+href="(https://vk.com/[^"]+)"%s*/>')
       username = string.match(newurl, "^https?://vk%.com/(.+)$")
       check(newurl)
+      newurl = string.match(html, '<meta%s+property="og:url"%s+content="([^"]+)"')
+      if newurl then
+        check(newurl)
+      end
       local max_id = 0
       for wall_id in string.gmatch(html, "https?://vk%.com/wall" .. item_value_match .. "_([0-9]+)$") do
         wall_id = tonumber(wall_id)
@@ -304,6 +358,8 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
               params_count = params_count + 1
             end
             if params_count ~= 1 then
+              io.stdout:write("There should only be one parameter in the video player data.\n")
+              io.stdout:flush()
               abort_item()
               return {}
             end
@@ -312,6 +368,20 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
             queue(newurl)
           end
         end
+        return urls
+      end
+print(url)
+      if url == "https://vk.com/al_photos.php?act=show" then
+        for image_url, _ in pairs(selected_images) do
+          image_url = string.gsub(image_url, "([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
+          image_url = string.gsub(image_url, "/", "\\/")
+          print(image_url)
+          if not string.match(html, image_url) then
+            io.stdout:write("Could not find selected high quality image in image data.\n")
+            io.stdout:flush()
+          end
+        end
+        return urls
       end
       local sig = string.match(url, "[%?&]sig=([^&]+)")
       if sig and ids[sig] then
@@ -325,6 +395,8 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
           end
         end
         if not max_data then
+          io.stdout:write("No maximum bandwidth found.\n")
+          io.stdout:flush()
           abort_item()
           return urls
         end
@@ -335,10 +407,86 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
         check(newurl)
         check(newurl .. "&bytes=0-" .. indexrange_max)
       end
+      if string.match(url, "/wall%-?[0-9]+_[0-9]+$")
+        or string.match(url, "/photo%-?[0-9]+_[0-9]+$") then
+        for image_data in string.gmatch(html, 'showPhoto%(([^%)]+), event%)') do
+          image_data = string.gsub(image_data, "&quot;", '"')
+print(image_data)
+          local image_id, wall_id, image_json = string.match(image_data, "'(%-?[0-9]+_[0-9]+)',%s*'(wall%-?[0-9]+_[0-9]+)',%s*({.+})%s*$")
+          if not image_json then
+            io.stdout:write("No image data found.\n")
+            io.stdout:flush()
+            abort_item()
+            return urls
+          end
+          if string.match(url, "/wall") then
+            xml_post_request(
+              "https://vk.com/al_photos.php?act=show",
+              "act=show" .. 
+                "&al=1" .. 
+                "&al_ad=0" .. 
+                "&dmcah=" ..
+                "&list=" .. wall_id .. 
+                "&module=wall" ..
+                "&photo=" .. image_id
+            )
+            check(url .. "?z=photo" .. image_id .. "%2F" .. wall_id)
+            check("https://vk.com/photo-17315087_457275730")
+          elseif string.match(url, "/photo(%-?[0-9]+_[0-9]+)$") == image_id then
+            xml_post_request(
+              "https://vk.com/al_photos.php?act=show",
+              "act=show" .. 
+                "&al=1" .. 
+                "&dmcah=" ..
+                "&list=" .. wall_id .. "%2Frev" ..
+                "&module=photos" ..
+                "&photo=" .. image_id
+            )
+          end
+        end
+      elseif string.match(url, "%?z=photo") then
+        local data = string.match(html, '%(({"zFields".-})%)')
+print(data)
+        if not data then
+          io.stdout:write("No photo data with zFields found.\n")
+          io.stdout:flush()
+          abort_item()
+          return urls
+        end
+        local data = JSON:decode(data)
+        local max_y = 0
+        local max_image = nil
+        for k, v in pairs(data["zOpts"]["temp"]) do
+          if type(v) == "table" then
+            local list_length = 0
+            for _ in pairs(v) do
+              list_length = list_length + 1
+            end
+            if list_length == 3 and v[3] > max_y then
+              max_y = v[3]
+              max_image = v[1]
+            end
+          end
+        end
+        if not max_image then
+          io.stdout:write("No maximum size image found.\n")
+          io.stdout:flush()
+          abort_item()
+          return urls
+        end
+        check(max_image)
+        selected_images[max_image] = true
+        return urls
+      end
+      if string.match(url, "/photo%-?[0-9]+_[0-9]+$") then
+        check(url .. "?rev=1")
+      end
       for video_data in string.gmatch(html, 'onclick="return%s+showVideo%(([^%)]+), event, this%);"') do
         video_data = string.gsub(video_data, "&quot;", '"')
         local video_id, video_list, video_json = string.match(video_data, '"([^"]+)",%s*"([^"]+)",%s*({.+})$')
         if not video_json then
+          io.stdout:write("No video JSON data found.\n")
+          io.stdout:flush()
           abort_item()
           return urls
         end
@@ -349,14 +497,14 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
             items_count = items_count + 1
           end
           if items_count > 1 then
+            io.stdout:write("More than a single addParams parameter found for video.\n")
+            io.stdout:flush()
             abort_item()
             return urls
           end
-          table.insert(urls, {
-            url="https://vk.com/al_video.php?act=video_box",
-            method="POST",
-            body_data=
-              "al=1" ..
+          xml_post_request(
+            "https://vk.com/al_video.php?act=video_box",
+            "al=1" ..
               "&autoplay=" .. video_json["autoplay"] ..
               "&autoplay_sound=0" .. 
               "&from_autoplay=1" .. 
@@ -364,27 +512,17 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
               "&module=wall" ..
               "&post_id=" .. video_json["addParams"]["post_id"] ..
               "&stretch_vertical=0" .. 
-              "&video=" .. video_id,
-            headers={
-              ["X-Requested-With"]="XMLHttpRequest",
-              ["Content-Type"]="application/x-www-form-urlencoded"
-            }
-          })
-          table.insert(urls, {
-            url="https://vk.com/al_video.php?act=video_box",
-            method="POST",
-            body_data=
-              "al=1" ..
+              "&video=" .. video_id
+          )
+          xml_post_request(
+            "https://vk.com/al_video.php?act=video_box",
+            "al=1" ..
               "&autoplay=" .. video_json["autoplay"] ..
               "&list=" .. video_list .. 
               "&module=wall" ..
               "&post_id=" .. video_json["addParams"]["post_id"] ..
-              "&video=" .. video_id,
-            headers={
-              ["X-Requested-With"]="XMLHttpRequest",
-              ["Content-Type"]="application/x-www-form-urlencoded"
-            }
-          })
+              "&video=" .. video_id
+          )
         end
       end
     end
@@ -504,6 +642,7 @@ wget.callbacks.finish = function(start_time, end_time, wall_time, numurls, total
   end
   file:close()
   for key, data in pairs({
+    ["urls-ajsy1kcax4kmzsu"] = discovered_outlinks,
     ["urls-ajsy1kcax4kmzsu"] = discovered_outlinks
   }) do
     print('queuing for', string.match(key, "^(.+)%-"))
