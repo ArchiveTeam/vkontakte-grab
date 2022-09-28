@@ -609,8 +609,7 @@ print(video_json)
         end
         return urls
       end
-      if string.match(url, "/wall%-?[0-9]+_[0-9]+")
-        or string.match(url, "/[^%?]+%?w=wall%-?[0-9]+_[0-9]+") then
+      if string.match(url, "/wall%-?[0-9]+_[0-9]+") then
         for image_data in string.gmatch(html, 'showPhoto%(([^%)]+), event%)') do
           image_data = string.gsub(image_data, "&quot;", '"')
           local image_id, wall_id, image_json = string.match(image_data, "'(%-?[0-9]+_[0-9]+)',%s*'(wall%-?[0-9]+_[0-9]+)',%s*({.+})%s*$")
