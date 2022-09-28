@@ -88,7 +88,7 @@ discover_item = function(target, shard, item)
     target[shard] = {}
   end
   if not target[shard][item] then
---print("queuing" , item, "to", shard)
+print("queuing" , item, "to", shard)
     target[shard][item] = true
   end
 end
@@ -354,6 +354,28 @@ print(url_)
     check(url)
   end
 
+  local function process_al_photos(data)
+    local max_size = 0
+    local max_url = nil
+    for k, v in pairs(data[4]) do
+      if ids[string.match(v["id"], "^%-?[0-9]+_([0-9]+)")] then
+        for k1, v1 in pairs(v) do
+          if type(v1) == "table" and v[k1 .. "src"] and v1[3] > max_size then
+            max_size = v1[3]
+            max_url = v1[1]
+          end
+        end
+      end
+    end
+    print('Found max URL ' .. max_url)
+    if not max_url then
+      io.stdout:write("Could not find photo in al_photos.php data.\n")
+      io.stdout:flush()
+      abort_item()
+    end
+    return max_url
+  end
+
   if allowed(url) and status_code < 300
     and not string.match(url, "^https?://[^/]*userapi%.com/") then
     html = read_file(file)
@@ -549,20 +571,14 @@ print(html)
 
       -- POST PHOTOS
       if url == "https://vk.com/al_photos.php?act=show" then
-        
-
-        for image_url, _ in pairs(selected_images) do
-          image_url = string.gsub(image_url, "([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
-          image_url = string.gsub(image_url, "/", "\\/")
-          if not string.match(html, image_url) then
-            io.stdout:write("Could not find selected high quality image in image data.\n")
-            io.stdout:flush()
-          end
+        local json = JSON:decode(html)
+        local max_url = process_al_photos(json["payload"][2])
+        if max_url then
+          check(max_url)
         end
         return urls
       end
-      if string.match(url, "/wall%-?[0-9]+_[0-9]+")
-        --[[or string.match(url, "/photo%-?[0-9]+_[0-9]+")]] then
+      if string.match(url, "/wall%-?[0-9]+_[0-9]+") then
         for image_data in string.gmatch(html, 'showPhoto%(([^%)]+), event%)') do
           image_data = string.gsub(image_data, "&quot;", '"')
           local image_id, wall_id, image_json = string.match(image_data, "'(%-?[0-9]+_[0-9]+)',%s*'(wall%-?[0-9]+_[0-9]+)',%s*({.+})%s*$")
@@ -574,42 +590,31 @@ print(html)
           end
           if wall_id == "wall" .. item_user .. "_" .. item_value then
             ids[string.match(image_id, "([0-9]+)$")] = true
-            if string.match(url, "/wall") then
-              xml_post_request(
-                "https://vk.com/al_photos.php?act=show",
-                "act=show"
-                .. "&al=1"
-                .. "&al_ad=0"
-                .. "&dmcah="
-                .. "&list=" .. wall_id
-                .. "&module=wall"
-                .. "&photo=" .. image_id
-              )
-              check("https://vk.com/photo" .. image_id)
-              if not string.match(url, "[%?&]z=photo") then
-                local newurl = url
-                if string.match(newurl, "%?") then
-                  newurl = newurl .. "&"
-                else
-                  newurl = newurl .. "?"
-                end
-                newurl = newurl .. "z=photo" .. image_id .. "%2F" .. wall_id
-                check(newurl)
+            xml_post_request(
+              "https://vk.com/al_photos.php?act=show",
+              "act=show"
+              .. "&al=1"
+              .. "&al_ad=0"
+              .. "&dmcah="
+              .. "&list=" .. wall_id
+              .. "&module=wall"
+              .. "&photo=" .. image_id
+            )
+            check("https://vk.com/photo" .. image_id)
+            if not string.match(url, "[%?&]z=photo") then
+              local newurl = url
+              if string.match(newurl, "%?") then
+                newurl = newurl .. "&"
+              else
+                newurl = newurl .. "?"
               end
-            elseif string.match(url, "/photo(%-?[0-9]+_[0-9]+)$") == image_id then
-              xml_post_request(
-                "https://vk.com/al_photos.php?act=show",
-                "act=show"
-                .. "&al=1"
-                .. "&dmcah="
-                .. "&list=" .. wall_id .. "%2Frev"
-                .. "&module=photos"
-                .. "&photo=" .. image_id
-              )
+              newurl = newurl .. "z=photo" .. image_id .. "%2F" .. wall_id
+              check(newurl)
             end
           end
         end
-      elseif string.match(url, "%?z=photo") then
+      end
+      if string.match(url, "[%?&]z=photo") then
         local data = string.match(html, '%(({"zFields".-})%)')
         if not data then
           io.stdout:write("No photo data with zFields found.\n")
@@ -642,8 +647,27 @@ print(html)
         selected_images[max_image] = true
         return urls
       end
-      if string.match(url, "/photo%-?[0-9]+_[0-9]+$") then
-        check(url .. "?rev=1")
+      if string.match(url, "/photo%-?[0-9]+_[0-9]+") then
+        if not string.match(url, "%?") then
+          check(url .. "?rev=1")
+        end
+        local params, data = string.match(html, "ajax%.preload%('al_photos%.php',%s*({.-}),%s*(%[.-%])%);")
+        params = JSON:decode(params)
+        data = JSON:decode(data)
+        max_url = process_al_photos(data)
+        if max_url then
+          check(max_url)
+        end
+        xml_post_request(
+          "https://vk.com/al_photos.php?act=show",
+          "act=" .. params["act"]
+          .. "&al=1"
+          .. "&dmcah="
+          .. "&list=" .. string.gsub(params["list"], "/", "%%2F")
+          .. "&module=" .. params["module"]
+          .. "&photo=" .. params["photo"]
+        )
+        return urls
       end
 
       -- POST HTML
