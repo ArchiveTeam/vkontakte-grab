@@ -59,11 +59,11 @@ if not WGET_AT:
 #
 # Update this each time you make a non-cosmetic change.
 # It will be added to the WARC files and reported to the tracker.
-VERSION = '20220628.03'
-USER_AGENT = 'Archive Team'
+VERSION = '20220929.01'
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:104.0) Gecko/20100101 Firefox/104.0'
 TRACKER_ID = 'vkontakte'
 TRACKER_HOST = 'legacy-api.arpa.li'
-MULTI_ITEM_SIZE = 1
+MULTI_ITEM_SIZE = 40
 
 
 ###########################################################################
@@ -275,8 +275,12 @@ class WgetArgs(object):
             wget_args.extend(['--warc-header', 'x-wget-at-project-item-name: '+item_name])
             wget_args.append('item-name://'+item_name)
             item_type, item_value = item_name.split(':', 1)
-            if item_type == 'id':
+            if item_type == 'id' and not item_value.startswith('-'):
                 vkontakte_id = 'id' + item_value
+                wget_args.extend(['--warc-header', 'vkontakte-id: '+vkontakte_id])
+                wget_args.append('https://vk.com/'+vkontakte_id)
+            elif item_type == 'id':# and item_value.startswith('-')
+                vkontakte_id = 'public' + item_value.lstrip('-')
                 wget_args.extend(['--warc-header', 'vkontakte-id: '+vkontakte_id])
                 wget_args.append('https://vk.com/'+vkontakte_id)
             elif item_type == 'wall':
@@ -286,6 +290,11 @@ class WgetArgs(object):
                 wget_args.append('https://vk.com/'+vkontakte_id)
             elif item_type == 'url':
                 wget_args.extend(['--warc-header', 'vkontakte-resource-url: '+item_value])
+                pp_url = 'https://pp.userapi.com/'+item_value.split('/', 3)[-1]
+                for s in ('&type=album', '&ava=1'):
+                    if s in pp_url:
+                        wget_args.append(pp_url.replace(s, ''))
+                wget_args.append(pp_url)
                 wget_args.append(item_value)
             else:
                 raise Exception('Unknown item')
@@ -316,7 +325,7 @@ project = Project(
 pipeline = Pipeline(
     CheckIP(),
     GetItemFromTracker('http://{}/{}/multi={}/'
-        .format(TRACKER_HOST, 'arkivertest', MULTI_ITEM_SIZE),
+        .format(TRACKER_HOST, 'vkontakte', MULTI_ITEM_SIZE),
         downloader, VERSION),
     PrepareDirectories(warc_prefix=TRACKER_ID),
     WgetDownload(
