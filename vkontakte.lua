@@ -766,7 +766,8 @@ wget.callbacks.write_to_warc = function(url, http_stat)
   end
   if item_type == "wall" and not wall_url then
     local html = read_file(http_stat["local_file"])
-    if string.match(html, 'onclick="return%s+showVideo%(') then
+    if string.match(html, 'onclick="return%s+show[A-Za-z0-9]+Video%(')
+      or string.match(html, "data%-video") then
       io.stdout:write("Videos are not supported yet.\n")
       io.stdout:flush()
       abort_item()
