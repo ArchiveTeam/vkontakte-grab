@@ -32,6 +32,7 @@ local allowed_urls = {}
 local item_user = nil
 local selected_images = {}
 local primary_url = nil
+local wall_url = nil
 
 local username = nil
 
@@ -200,6 +201,7 @@ find_item = function(url)
     if item_name_new ~= item_name then
       ids = {}
       username = nil
+      wall_url = nil
       ids[value] = true
       if string.match(value, "^%-.") then
         ids[string.match(value, "^-(.+)$")] = true
@@ -355,25 +357,31 @@ print(url_)
   end
 
   local function process_al_photos(data)
-    local max_size = 0
-    local max_url = nil
+    local found_photos = {}
     for k, v in pairs(data[4]) do
       if ids[string.match(v["id"], "^%-?[0-9]+_([0-9]+)")] then
+        local max_size = 0
+        local max_url = nil
         for k1, v1 in pairs(v) do
           if type(v1) == "table" and v[k1 .. "src"] and v1[3] > max_size then
             max_size = v1[3]
             max_url = v1[1]
           end
         end
+        print('Found max URL ' .. max_url)
+        if not max_url then
+          io.stdout:write("Could not find photo in al_photos.php data.\n")
+          io.stdout:flush()
+          abort_item()
+          error()
+        end
+        table.insert(found_photos, {
+          url=max_url,
+          original=v
+        })
       end
     end
-    print('Found max URL ' .. max_url)
-    if not max_url then
-      io.stdout:write("Could not find photo in al_photos.php data.\n")
-      io.stdout:flush()
-      abort_item()
-    end
-    return max_url
+    return found_photos
   end
 
   if allowed(url) and status_code < 300
@@ -464,7 +472,7 @@ print(url_)
                   io.stdout:write("There should only be one parameter in the video player data.\n")
                   io.stdout:flush()
                   abort_item()
-                  return {}
+                  error()
                 end
                 found = true
                 local newurl = params[1]["dash_uni"]
@@ -484,7 +492,7 @@ print(url_)
                   io.stdout:write("Could not find regular max size video URL.\n")
                   io.stdout:flush()
                   abort_item()
-                  return {}
+                  error()
                 end
 print(max_url, 'CHECK')
                 check_sig(max_url)
@@ -496,7 +504,7 @@ print(max_url, 'CHECK')
           io.stdout:write("Could not find video data in video response.\n")
           io.stdout:flush()
           abort_item()
-          return {}
+          error()
         end
         return urls
       end
@@ -516,7 +524,7 @@ print(html)
           io.stdout:write("No maximum bandwidth found.\n")
           io.stdout:flush()
           abort_item()
-          return urls
+          error()
         end
         local baseurl = string.gsub(string.match(max_data, "<BaseURL>(.-)</BaseURL>"), "&amp;", "&")
         local indexrange_max = string.match(max_data, 'indexRange="[0-9]+%-([0-9]+)"')
@@ -531,10 +539,12 @@ print(html)
           io.stdout:write("No video JSON data found.\n")
           io.stdout:flush()
           abort_item()
-          return urls
+          error()
         end
+print(video_json)
         video_json = JSON:decode(video_json)
-        if video_json["addParams"]["post_id"] == item_user .. "_" .. item_value then
+        if video_json["addParams"]
+          and video_json["addParams"]["post_id"] == item_user .. "_" .. item_value then
           local items_count = 0
           for k, v in pairs(video_json["addParams"]) do
             items_count = items_count + 1
@@ -543,7 +553,7 @@ print(html)
             io.stdout:write("More than a single addParams parameter found for video.\n")
             io.stdout:flush()
             abort_item()
-            return urls
+            error()
           end
           xml_post_request(
             "https://vk.com/al_video.php?act=video_box",
@@ -572,9 +582,26 @@ print(html)
       -- POST PHOTOS
       if url == "https://vk.com/al_photos.php?act=show" then
         local json = JSON:decode(html)
-        local max_url = process_al_photos(json["payload"][2])
-        if max_url then
-          check(max_url)
+        for _, photolist in pairs(json["payload"]) do
+          if type(photolist) == "table" then
+            local found_photos = process_al_photos(photolist)
+            for _, d in pairs(found_photos) do
+              local location = d["original"]["id"] .. "/" .. photolist[1]
+              if not string.match(url, "[%?&]z=photo") then
+                local newurl = wall_url
+                if string.match(newurl, "%?") then
+                  newurl = newurl .. "&"
+                else
+                  newurl = newurl .. "?"
+                end
+                newurl = newurl .. "z=photo" .. string.gsub(location, "/", "%%2F")
+                check(newurl)
+                newurl = urlparse.absolute(wall_url, d["original"]["author_href"]) .. "?z=photo" .. string.gsub(location, "/", "%%2F")
+                check(newurl)
+                check(d["original"]["author_photo"])
+              end
+            end
+          end
         end
         return urls
       end
@@ -586,31 +613,23 @@ print(html)
             io.stdout:write("No image data found.\n")
             io.stdout:flush()
             abort_item()
-            return urls
+            error()
           end
           if wall_id == "wall" .. item_user .. "_" .. item_value then
             ids[string.match(image_id, "([0-9]+)$")] = true
-            xml_post_request(
-              "https://vk.com/al_photos.php?act=show",
-              "act=show"
-              .. "&al=1"
-              .. "&al_ad=0"
-              .. "&dmcah="
-              .. "&list=" .. wall_id
-              .. "&module=wall"
-              .. "&photo=" .. image_id
-            )
-            check("https://vk.com/photo" .. image_id)
-            if not string.match(url, "[%?&]z=photo") then
-              local newurl = url
-              if string.match(newurl, "%?") then
-                newurl = newurl .. "&"
-              else
-                newurl = newurl .. "?"
-              end
-              newurl = newurl .. "z=photo" .. image_id .. "%2F" .. wall_id
-              check(newurl)
+            for _, module_ in pairs({"wall", "public"}) do
+              xml_post_request(
+                "https://vk.com/al_photos.php?act=show",
+                "act=show"
+                .. "&al=1"
+                .. "&al_ad=0"
+                .. "&dmcah="
+                .. "&list=" .. wall_id
+                .. "&module=" .. module_
+                .. "&photo=" .. image_id
+              )
             end
+            check("https://vk.com/photo" .. image_id)
           end
         end
       end
@@ -620,7 +639,7 @@ print(html)
           io.stdout:write("No photo data with zFields found.\n")
           io.stdout:flush()
           abort_item()
-          return urls
+          error()
         end
         local data = JSON:decode(data)
         local max_y = 0
@@ -641,7 +660,7 @@ print(html)
           io.stdout:write("No maximum size image found.\n")
           io.stdout:flush()
           abort_item()
-          return urls
+          error()
         end
         check(max_image)
         selected_images[max_image] = true
@@ -654,9 +673,10 @@ print(html)
         local params, data = string.match(html, "ajax%.preload%('al_photos%.php',%s*({.-}),%s*(%[.-%])%);")
         params = JSON:decode(params)
         data = JSON:decode(data)
-        max_url = process_al_photos(data)
-        if max_url then
-          check(max_url)
+        local found_photos = process_al_photos(data)
+        for _, d in pairs(found_photos) do
+          check(d["url"])
+          check(d["original"]["author_photo"])
         end
         xml_post_request(
           "https://vk.com/al_photos.php?act=show",
@@ -681,6 +701,7 @@ print(html)
           io.stdout:write("No author data found.\n")
           io.stdout:flush()
           abort_grab()
+          error()
         end
         local data_from_id = string.match(author_data, 'data%-from%-id="(%-?[0-9]+)"')
         if data_from_id == item_user then
@@ -726,7 +747,32 @@ print(html)
 end
 
 wget.callbacks.write_to_warc = function(url, http_stat)
+  status_code = http_stat["statcode"]
   find_item(url["url"])
+  if status_code >= 300 and status_code <= 399 then
+    local newloc = urlparse.absolute(url["url"], http_stat["newloc"])
+    if not string.match(newloc, "%?reply=")
+      and not string.match(newloc, "^https?://away%.vk%.com/")
+      and not string.match(newloc, "^https?://login%.vk%.com/%?")
+      and not string.match(newloc, "^https?://vk%.com/login%.php%?")
+      and not string.match(newloc, "^https?://vk%.com/login%?")
+      and not string.match(newloc, "^https?://[^/]*userapi%.com/")
+      and string.match(url["url"], "^https?://[^/]+/([^/%?&;]+)") ~= string.match(newloc, "^https?://[^/]+/([^/%?&;]+)") then
+      io.stdout:write("Found odd redirect.\n")
+      io.stdout:flush()
+      abort_item()
+      return false
+    end
+  end
+  if item_type == "wall" and not wall_url then
+    local html = read_file(http_stat["local_file"])
+    if string.match(html, 'onclick="return%s+showVideo%(') then
+      io.stdout:write("Videos are not supported yet.\n")
+      io.stdout:flush()
+      abort_item()
+      return false
+    end
+  end
   return true
 end
 
@@ -743,20 +789,12 @@ wget.callbacks.httploop_result = function(url, err, http_stat)
 
   find_item(url["url"])
 
+  if not wall_url and string.match(url["url"], "/wall") and status_code == 200 then
+    wall_url = url["url"]
+  end
+
   if status_code >= 300 and status_code <= 399 then
     local newloc = urlparse.absolute(url["url"], http_stat["newloc"])
-    if not string.match(newloc, "%?reply=")
-      and not string.match(newloc, "^https?://away%.vk%.com/")
-      and not string.match(newloc, "^https?://login%.vk%.com/%?")
-      and not string.match(newloc, "^https?://vk%.com/login%.php%?")
-      and not string.match(newloc, "^https?://vk%.com/login%?")
-      and not string.match(newloc, "^https?://[^/]*userapi%.com/")
-      and string.match(url["url"], "^https?://[^/]+/([^/%?&;]+)") ~= string.match(newloc, "^https?://[^/]+/([^/%?&;]+)") then
-      io.stdout:write("Found odd redirect.\n")
-      io.stdout:flush()
-      abort_item()
-      return wget.actions.EXIT
-    end
     if string.match(url["url"], "^https?://vk%.com/doc%-?[0-9]+_[0-9]+") then
       allowed_urls[newloc] = true
     end
