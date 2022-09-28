@@ -384,6 +384,11 @@ print(url_)
     return found_photos
   end
 
+  local public_part = string.match(url, "^https://vk%.com/public([0-9].+)$")
+  if public_part then
+    check('https://vk.com/club' .. public_part)
+  end
+
   if allowed(url) and status_code < 300
     and not string.match(url, "^https?://[^/]*userapi%.com/") then
     html = read_file(file)
@@ -424,9 +429,6 @@ print(url_)
 
     -- POST
     if item_type == "wall" then
-      if string.match(url, "/[^%?]+%?w=wall%-?[0-9]+_[0-9]+$") then
-        return urls
-      end
 
       -- POST DOCUMENTS
       if allowed_urls[url] and string.match(url, "%?extra=") then
@@ -594,10 +596,12 @@ print(video_json)
                 else
                   newurl = newurl .. "?"
                 end
-                newurl = newurl .. "z=photo" .. string.gsub(location, "/", "%%2F")
+                local zphoto = "z=photo" .. string.gsub(location, "/", "%%2F")
+                newurl = newurl .. zphoto
                 check(newurl)
-                newurl = urlparse.absolute(wall_url, d["original"]["author_href"]) .. "?z=photo" .. string.gsub(location, "/", "%%2F")
+                newurl = urlparse.absolute(wall_url, d["original"]["author_href"]) .. "?" .. zphoto
                 check(newurl)
+                newurl = urlparse.absolute(wall_url, d["original"]["author_href"]) .. "?w=" .. string.match(wall_url, "/(wall%-?[0-9]+_[0-9]+)") .. "&" .. zphoto
                 check(d["original"]["author_photo"])
               end
             end
@@ -605,7 +609,8 @@ print(video_json)
         end
         return urls
       end
-      if string.match(url, "/wall%-?[0-9]+_[0-9]+") then
+      if string.match(url, "/wall%-?[0-9]+_[0-9]+")
+        or string.match(url, "/[^%?]+%?w=wall%-?[0-9]+_[0-9]+") then
         for image_data in string.gmatch(html, 'showPhoto%(([^%)]+), event%)') do
           image_data = string.gsub(image_data, "&quot;", '"')
           local image_id, wall_id, image_json = string.match(image_data, "'(%-?[0-9]+_[0-9]+)',%s*'(wall%-?[0-9]+_[0-9]+)',%s*({.+})%s*$")
@@ -629,7 +634,9 @@ print(video_json)
                 .. "&photo=" .. image_id
               )
             end
-            check("https://vk.com/photo" .. image_id)
+            if not string.match(wall_url, "%?") then
+              check("https://vk.com/photo" .. image_id)
+            end
           end
         end
       end
@@ -691,7 +698,8 @@ print(video_json)
       end
 
       -- POST HTML
-      if string.match(url, "/wall%-?[0-9]+_[0-9]+") then
+      if string.match(url, "/wall%-?[0-9]+_[0-9]+")
+        and not string.match(wall_url, "%?") then
         local author_data = string.match(html, '<a%s+(class="author"[^>]+)>')
         if not author_data then
           if string.match(html, '<div%s+class="message_page_title">Error</div>')
@@ -715,7 +723,7 @@ print(video_json)
             .. "&dmcah="
             .. "&loc=" .. author_slug
             .. "&location_owner_id=" .. data_from_id
-            .. "&ref="
+            .. "&ref=club"
             .. "&w=" .. wall_id
           )
         end
