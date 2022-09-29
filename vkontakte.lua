@@ -88,8 +88,8 @@ discover_item = function(target, shard, item)
   if not target[shard] then
     target[shard] = {}
   end
-  if not target[shard][item] then
-print("queuing" , item, "to", shard)
+  if not target[shard][item] and item ~= item_name then
+--print("queuing" , item, "to", shard)
     target[shard][item] = true
   end
 end
@@ -142,7 +142,7 @@ allowed = function(url, parenturl)
     return true
   end
 
-  if string.match(url, "^https?://[^/]*userapi%.com/.") then
+  if string.match(url, "^https?://[^/]*userapi%.com/.") and item_name then
     discover_item(discovered_items, "images", "url:" .. url)
     return false
   end
@@ -180,8 +180,7 @@ find_item = function(url)
     user, value = string.match(url, "^https?://vk%.com/wall(%-?[0-9]+)_([0-9]+)$")
     type_ = "wall"
   end
-  if not value and string.match(url, "^https?://[^/]*userapi%.com/.")
-    and not allowed(url) then
+  if not value and string.match(url, "^https?://[^/]*userapi%.com/.") then
     value = url
     type_ = "url"
   end
@@ -271,8 +270,8 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
     end
     if not processed(url_)
       and allowed(url_, origurl) then
-print(url_)
       table.insert(urls, { url=url_ })
+print(url_)
       addedtolist[url_] = true
       addedtolist[url] = true
     end
@@ -429,6 +428,9 @@ print(url_)
 
     -- POST
     if item_type == "wall" then
+      if string.match(url, "/[^%?]+%?w=wall%-?[0-9]+_[0-9]+$") then
+        return urls
+      end
 
       -- POST DOCUMENTS
       if allowed_urls[url] and string.match(url, "%?extra=") then
@@ -496,7 +498,6 @@ print(url_)
                   abort_item()
                   error()
                 end
-print(max_url, 'CHECK')
                 check_sig(max_url)
               end
             end
@@ -514,7 +515,6 @@ print(max_url, 'CHECK')
       if sig and ids[sig] and string.match(url, "[%?&]type=2") then
         local max_bandwidth = 0
         local max_data = nil
-print(html)
         for data in string.gmatch(html, "(<Representation.-</Representation>)") do
           local bandwidth = tonumber(string.match(data, 'bandwidth="([0-9]+)"'))
           if bandwidth > max_bandwidth then
@@ -543,7 +543,6 @@ print(html)
           abort_item()
           error()
         end
-print(video_json)
         video_json = JSON:decode(video_json)
         if video_json["addParams"]
           and video_json["addParams"]["post_id"] == item_user .. "_" .. item_value then
@@ -763,6 +762,7 @@ wget.callbacks.write_to_warc = function(url, http_stat)
       and not string.match(newloc, "^https?://login%.vk%.com/%?")
       and not string.match(newloc, "^https?://vk%.com/login%.php%?")
       and not string.match(newloc, "^https?://vk%.com/login%?")
+      and not string.match(newloc, "^https?://vk%.com/public")
       and not string.match(newloc, "^https?://[^/]*userapi%.com/")
       and string.match(url["url"], "^https?://[^/]+/([^/%?&;]+)") ~= string.match(newloc, "^https?://[^/]+/([^/%?&;]+)") then
       io.stdout:write("Found odd redirect.\n")
@@ -774,7 +774,8 @@ wget.callbacks.write_to_warc = function(url, http_stat)
   if item_type == "wall" and not wall_url then
     local html = read_file(http_stat["local_file"])
     if string.match(html, 'onclick="return%s+show[A-Za-z0-9]+Video%(')
-      or string.match(html, "data%-video") then
+      or string.match(html, "data%-video")
+      or string.match(html, "data%-audio") then
       io.stdout:write("Videos are not supported yet.\n")
       io.stdout:flush()
       abort_item()
@@ -825,7 +826,7 @@ wget.callbacks.httploop_result = function(url, err, http_stat)
   if status_code == 0 or status_code >= 400 then
     io.stdout:write("Server returned bad response. Sleeping.\n")
     io.stdout:flush()
-    local maxtries = 10
+    local maxtries = 5
     tries = tries + 1
     if tries > maxtries then
       tries = 0
@@ -840,8 +841,6 @@ wget.callbacks.httploop_result = function(url, err, http_stat)
   end
 
   tries = 0
-
-print(url["url"])
 
   return wget.actions.NOTHING
 end
