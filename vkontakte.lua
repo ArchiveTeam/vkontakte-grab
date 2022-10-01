@@ -675,7 +675,7 @@ print(url_)
         if not string.match(url, "%?") then
           check(url .. "?rev=1")
         end
-        local params, data = string.match(html, "ajax%.preload%('al_photos%.php',%s*({.-}),%s*(%[.-%])%);")
+        local params, data = string.match(html, "ajax%.preload%('al_photos%.php',%s*({.-}),%s*(%[.-%])%);[^\\]")
         params = JSON:decode(params)
         data = JSON:decode(data)
         local found_photos = process_al_photos(data)
@@ -774,12 +774,22 @@ wget.callbacks.write_to_warc = function(url, http_stat)
   if item_type == "wall" and not wall_url then
     local html = read_file(http_stat["local_file"])
     if string.match(html, 'onclick="return%s+show[A-Za-z0-9]+Video%(')
-      or string.match(html, "data%-video")
-      or string.match(html, "data%-audio") then
+      or string.match(html, "data%-video") then
       io.stdout:write("Videos are not supported yet.\n")
       io.stdout:flush()
       abort_item()
       return false
+    end
+    local data_audio = string.match(html, 'data%-audio="([^"]+)"')
+    if data_audio then
+      data_audio = string.gsub(data_audio, "&quot;", '"')
+      data_audio = JSON:decode(data_audio)
+      if data_audio[3] ~= "" then
+        io.stdout:write("Audios are not supported yet.\n")
+        io.stdout:flush()
+        abort_item()
+        return false
+      end
     end
   end
   return true
