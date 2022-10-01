@@ -59,11 +59,17 @@ kill_grab = function(item)
   killgrab = true
 end
 
-read_file = function(file)
+read_file = function(file, bytes)
+  if not bytes then
+    bytes = "*all"
+  end
   if file then
     local f = assert(io.open(file))
-    local data = f:read("*all")
+    local data = f:read(bytes)
     f:close()
+    if not data then
+      data = ""
+    end
     return data
   else
     return ""
@@ -78,7 +84,7 @@ processed = function(url)
 end
 
 discover_item = function(target, shard, item)
-  if string.match(item, "^u?r?l?:?http://[^/]*userapi%.com/.") then
+  if string.match(item, "^u?r?l?:?http://.") then
     item = string.gsub(item, "^(u?r?l?:?)http://(.+)", "%1https://%2")
   end
   local temp = string.match(item, "(.-)%s+2x$")
@@ -89,16 +95,16 @@ discover_item = function(target, shard, item)
     target[shard] = {}
   end
   if not target[shard][item] and item ~= item_name then
---print("queuing" , item, "to", shard)
+print("queuing" , item, "to", shard)
     target[shard][item] = true
   end
 end
 
 allowed = function(url, parenturl)
   if allowed_urls[url]
-    or url == "https://vk.com/al_photos.php?act=show"
-    or url == "https://vk.com/al_video.php?act=video_box"
-    or url == "https://vk.com/wkview.php?act=show" then
+    or string.match(url, "^https://vk%.com/al_photos%.php%?act=")
+    or string.match(url, "^https://vk%.com/al_video%.php%?act=")
+    or string.match(url, "^https://vk%.com/wkview%.php%?act=") then
     return true
   end
 
@@ -142,7 +148,10 @@ allowed = function(url, parenturl)
     return true
   end
 
-  if string.match(url, "^https?://[^/]*userapi%.com/.") and item_name then
+  if item_name and (
+    string.match(url, "^https?://[^/]*userapi%.com/.")
+    or string.match(url, "^https?://[^/]*mycdn%.me/.")
+  ) then
     discover_item(discovered_items, "images", "url:" .. url)
     return false
   end
@@ -261,6 +270,12 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
   end
 
   local function check(newurl)
+    local split_a, split_b = string.match(newurl, "^(https?://.-),(https?://.+)$")
+    if split_a and split_b then
+      check(split_a)
+      check(split_b)
+      return nil
+    end
     newurl = decode_codepoint(newurl)
     local origurl = url
     local url = string.match(newurl, "^([^#]+)")
@@ -383,13 +398,96 @@ print(url_)
     return found_photos
   end
 
+  local function process_video_player(data)
+    local params = data["params"]
+    local params_count = 0
+    for _ in pairs(params) do
+      params_count = params_count + 1
+    end
+    if params_count > 1 then
+      io.stdout:write("There should only be one parameter in the video player data.\n")
+      io.stdout:flush()
+      abort_item()
+      error()
+    end
+    params = params[1]
+    --[[local newurl = params["dash_sep"]
+    check_sig(newurl)]]
+    check(params["author_photo"])
+    check(params["jpg"])
+    if params["subs"] then
+      for _, sub_data in pairs(params["subs"]) do
+        check_sig(sub_data["url"])
+      end
+    end
+    local max_pixels = 0
+    local max_url = nil
+    for k, v in pairs(params) do
+      local pixels = tonumber(string.match(k, "^url([0-9]+)$"))
+      if pixels and pixels > max_pixels then
+        max_pixels = pixels
+        max_url = v
+      end
+      if string.match(k, "^first_frame") then
+        check(v)
+      end
+    end
+    if not max_url then
+      io.stdout:write("Could not find regular max size video URL.\n")
+      io.stdout:flush()
+      abort_item()
+      error()
+    end
+    print('Found max URL ' .. max_url)
+    check_sig(max_url)
+  end
+
+  local function process_al_video(data)
+    local found = false
+    for _, e in pairs(data) do
+      if type(e) == "table" and e["mvData"] and ids[tostring(e["mvData"]["vid"])] then
+        check(e["mvData"]["authorPhoto"])
+        if e["player"] then
+          process_video_player(e["player"])
+          found = true
+        end
+      end
+    end
+    return found
+  end
+
+  local function sorted_params(data)
+    local keys = {}
+    local params = ""
+    for k, v in pairs(data) do
+      table.insert(keys, k)
+    end
+    table.sort(keys)
+    for _, k in pairs(keys) do
+      if keys[k] then
+        if string.len(params) > 0 then
+          params = params .. "&"
+        end
+        params = params .. k .. "=" .. keys[k]
+      end
+    end
+    return params
+  end
+
   local public_part = string.match(url, "^https://vk%.com/public([0-9].+)$")
   if public_part then
     check('https://vk.com/club' .. public_part)
   end
 
   if allowed(url) and status_code < 300
-    and not string.match(url, "^https?://[^/]*userapi%.com/") then
+    and not string.match(url, "^https?://[^/]*userapi%.com/")
+    and url ~= "https://vk.com/al_video.php?act=load_playlist_videos" then
+
+    if string.match(url, "[%?&]sig=")
+      and not string.match(read_file(file, 20), "[xX][mM][lL]") then
+      return urls
+    end
+
     html = read_file(file)
 
     -- ACCOUNT/GROUP
@@ -460,50 +558,19 @@ print(url_)
       end
 
       -- POST VIDEO
-      if url == "https://vk.com/al_video.php?act=video_box" then
+      if url == "https://vk.com/al_video.php?act=video_box"
+        or url == "https://vk.com/al_video.php?act=show" then
         local data = JSON:decode(html)
         local found = false
         for _, d in pairs(data["payload"]) do
           if type(d) == "table" then
-            for _, e in pairs(d) do
-              if type(e) == "table" and e["player"] then
-                local params = e["player"]["params"]
-                local params_count = 0
-                for _ in pairs(params) do
-                  params_count = params_count + 1
-                end
-                if params_count ~= 1 then
-                  io.stdout:write("There should only be one parameter in the video player data.\n")
-                  io.stdout:flush()
-                  abort_item()
-                  error()
-                end
-                found = true
-                local newurl = params[1]["dash_uni"]
-                check_sig(newurl)
-                check(params[1]["author_photo"])
-                check(params[1]["jpg"])
-                local max_pixels = 0
-                local max_url = nil
-                for k, v in pairs(params[1]) do
-                  local pixels = tonumber(string.match(k, "^url([0-9]+)$"))
-                  if pixels and pixels > max_pixels then
-                    max_pixels = pixels
-                    max_url = v
-                  end
-                end
-                if not max_url then
-                  io.stdout:write("Could not find regular max size video URL.\n")
-                  io.stdout:flush()
-                  abort_item()
-                  error()
-                end
-                check_sig(max_url)
-              end
+            if process_al_video(d) then
+              found = true
             end
           end
         end
-        if not found then
+        if not found and url ~= "https://vk.com/al_video.php?act=show" then
+print(html)
           io.stdout:write("Could not find video data in video response.\n")
           io.stdout:flush()
           abort_item()
@@ -512,72 +579,156 @@ print(url_)
         return urls
       end
       local sig = string.match(url, "[%?&]sig=([^&]+)")
-      if sig and ids[sig] and string.match(url, "[%?&]type=2") then
-        local max_bandwidth = 0
-        local max_data = nil
-        for data in string.gmatch(html, "(<Representation.-</Representation>)") do
-          local bandwidth = tonumber(string.match(data, 'bandwidth="([0-9]+)"'))
-          if bandwidth > max_bandwidth then
-            max_bandwidth = bandwidth
-            max_data = data
+      if sig and ids[sig] then
+        for adaptation_set in string.gmatch(html, "(<AdaptationSet.-</AdaptationSet>)") do
+          local max_bandwidth = 0
+          local max_data = nil
+          for data in string.gmatch(adaptation_set, "(<Representation.-</Representation>)") do
+            local bandwidth = tonumber(string.match(data, 'bandwidth="([0-9]+)"'))
+            if bandwidth > max_bandwidth then
+              max_bandwidth = bandwidth
+              max_data = data
+            end
           end
-        end
-        if not max_data then
-          io.stdout:write("No maximum bandwidth found.\n")
-          io.stdout:flush()
-          abort_item()
-          error()
-        end
-        local baseurl = string.gsub(string.match(max_data, "<BaseURL>(.-)</BaseURL>"), "&amp;", "&")
-        local indexrange_max = string.match(max_data, 'indexRange="[0-9]+%-([0-9]+)"')
-        local newurl = urlparse.absolute(url, baseurl)
-        check_sig(newurl)
-        check(newurl .. "&bytes=0-" .. indexrange_max)
-      end
-      for video_data in string.gmatch(html, 'onclick="return%s+showVideo%(([^%)]+), event, this%);"') do
-        video_data = string.gsub(video_data, "&quot;", '"')
-        local video_id, video_list, video_json = string.match(video_data, '"([^"]+)",%s*"([^"]+)",%s*({.+})$')
-        if not video_json then
-          io.stdout:write("No video JSON data found.\n")
-          io.stdout:flush()
-          abort_item()
-          error()
-        end
-        video_json = JSON:decode(video_json)
-        if video_json["addParams"]
-          and video_json["addParams"]["post_id"] == item_user .. "_" .. item_value then
-          local items_count = 0
-          for k, v in pairs(video_json["addParams"]) do
-            items_count = items_count + 1
-          end
-          if items_count > 1 then
-            io.stdout:write("More than a single addParams parameter found for video.\n")
+          if not max_data then
+            io.stdout:write("No maximum bandwidth found.\n")
             io.stdout:flush()
             abort_item()
             error()
           end
-          xml_post_request(
-            "https://vk.com/al_video.php?act=video_box",
-            "al=1"
-            .. "&autoplay=" .. video_json["autoplay"]
-            .. "&autoplay_sound=0"
-            .. "&from_autoplay=1"
-            .. "&list=" .. video_list
-            .. "&module=wall"
-            .. "&post_id=" .. video_json["addParams"]["post_id"]
-            .. "&stretch_vertical=0"
-            .. "&video=" .. video_id
-          )
-          xml_post_request(
-            "https://vk.com/al_video.php?act=video_box",
-            "al=1"
-            .. "&autoplay=" .. video_json["autoplay"]
-            .. "&list=" .. video_list
-            .. "&module=wall"
-            .. "&post_id=" .. video_json["addParams"]["post_id"]
-            .. "&video=" .. video_id
-          )
+          local baseurl = string.gsub(string.match(max_data, "<BaseURL>(.-)</BaseURL>"), "&amp;", "&")
+          local indexrange_max = string.match(max_data, 'indexRange="[0-9]+%-([0-9]+)"')
+          local newurl = urlparse.absolute(url, baseurl)
+          check_sig(newurl)
+          check(newurl .. "&bytes=0-" .. indexrange_max)
         end
+      end
+      for _, func_name in pairs({"showVideo", "showInlineVideo"}) do
+        for video_data in string.gmatch(html, 'onclick="return%s+' .. func_name .. '%(([^%)]+), event, this%);"') do
+          video_data = string.gsub(video_data, "&quot;", '"')
+          local video_id, video_list, video_json = string.match(video_data, '"([^"]+)",%s*"([^"]+)",%s*({.+})$')
+          if not video_json then
+            io.stdout:write("No video JSON data found.\n")
+            io.stdout:flush()
+            abort_item()
+            error()
+          end
+          video_json = JSON:decode(video_json)
+          if video_json["addParams"]
+            and video_json["addParams"]["post_id"] == item_user .. "_" .. item_value then
+            ids[string.match(video_id, "([0-9]+)$")] = true
+            local items_count = 0
+            for k, v in pairs(video_json["addParams"]) do
+              items_count = items_count + 1
+            end
+            if items_count > 1 then
+              io.stdout:write("More than a single addParams parameter found for video.\n")
+              io.stdout:flush()
+              abort_item()
+              error()
+            end
+            check(urlparse.absolute(url, "/video" .. video_id .. "?list=" .. video_list))
+            check(urlparse.absolute(url, "/video" .. video_id))
+            for _, module_ in pairs({"wall", "public"}) do
+              xml_post_request(
+                "https://vk.com/al_video.php?act=video_box",
+                "al=1"
+                .. "&autoplay=" .. video_json["autoplay"]
+                .. "&autoplay_sound=0"
+                .. "&from_autoplay=1"
+                .. "&list=" .. video_list
+                .. "&module=" .. module_
+                .. "&post_id=" .. video_json["addParams"]["post_id"]
+                .. "&stretch_vertical=0"
+                .. "&video=" .. video_id
+              )
+              xml_post_request(
+                "https://vk.com/al_video.php?act=video_box",
+                "al=1"
+                .. "&autoplay=" .. video_json["autoplay"]
+                .. "&list=" .. video_list
+                .. "&module=" .. module_
+                .. "&post_id=" .. video_json["addParams"]["post_id"]
+                .. "&video=" .. video_id
+              )
+              xml_post_request(
+                "https://vk.com/al_video.php?act=show",
+                "act=show"
+                .. "&al=1"
+                .. "&al_ad=0"
+                .. "&autoplay=1"
+                .. "&expand_player=1"
+                .. "&list=" .. video_list
+                .. "&load_playlist=1"
+                .. "&module=" .. module_
+                .. "&playlist_id=post_" .. video_json["addParams"]["post_id"]
+                .. "&post_id=" .. video_json["addParams"]["post_id"]
+                .. "&video=" .. video_id
+                .. "&webcast=0"
+              )
+            end
+            if string.match(url, "[%?&]z=video") then
+              local z_data = string.match(html, '%(({"zFields".-})%);')
+              local params_data = string.match(html, '%(({"params".-})%);')
+              if not z_data or not params_data then
+                io.stdout:write("No video data with zFields or params found.\n")
+                io.stdout:flush()
+                abort_item()
+                error()
+              end
+              local z_data = JSON:decode(z_data)
+              local params_data = JSON:decode(params_data)
+              if "?z=" .. string.gsub(z_data["zFields"]["z"], "/", "%2F") ~= params_data["params"]["loc"] then
+                io.stdout:write("Inconsistency in video data.\n")
+                io.stdout:flush()
+                abort_item()
+                error()
+              end
+              check(urlparse.absolute(url, params_data["params"]["loc"]))
+              local z = video_id .. "%2F" .. video_list .. "%2Fpl_post_" .. item_user .. "_" .. item_value
+              xml_post_request(
+                "https://vk.com/al_video.php?act=show",
+                "_nol=%7B%220%22%3A%22wall" .. item_user .. "_" .. item_value .. "%22%2C%22z%22%3A%22" .. z .. "%22%7D"
+                .. "&act=show"
+                .. "&al=1"
+                .. "&autoplay=0"
+                .. "&list=" .. string.match(z_data["zFields"]["z"], "[^/]+$")
+                .. "&module="
+                .. "&video=" .. string.match(z_data["zFields"]["z"], "^[^/]+")
+                .. "&webcast=0"
+              )
+            end
+          end
+        end
+      end
+      if string.match(url, "/video%-?[0-9]+_[0-9]+") then
+        local params, data = string.match(html, "ajax%.preload%('al_video%.php',%s*({.-}),%s*(%[.-%])%);[^\\]")
+        params = JSON:decode(params)
+        params["al"] = "1"
+        data = JSON:decode(data)
+        xml_post_request(
+          "https://vk.com/al_video.php?act=show",
+          sorted_params(params)
+        )
+        xml_post_request(
+          "https://vk.com/al_video.php?act=load_playlist_videos",
+          "al=" .. params["al"]
+          .. "&playlist_raw_id=" .. params["playlist_id"]
+          .. "&video_raw_id=" .. params["video"]
+        )
+        if not process_al_video(data) then
+          io.stdout:write("Could not find video data in video response.\n")
+          io.stdout:flush()
+          abort_item()
+          error()
+        end
+        return urls
+      end
+      if string.match(url, "^https?://vk%.com/video_ext%.php") then
+        local params = string.match(html, "playerParams%s*=%s*({.-});")
+        params = JSON:decode(params)
+        process_video_player(params)
+        return urls
       end
 
       -- POST PHOTOS
@@ -773,13 +924,13 @@ wget.callbacks.write_to_warc = function(url, http_stat)
   end
   if item_type == "wall" and not wall_url then
     local html = read_file(http_stat["local_file"])
-    if string.match(html, 'onclick="return%s+show[A-Za-z0-9]+Video%(')
+    --[[if string.match(html, 'onclick="return%s+show[A-Za-z0-9]+Video%(')
       or string.match(html, "data%-video") then
       io.stdout:write("Videos are not supported yet.\n")
       io.stdout:flush()
       abort_item()
       return false
-    end
+    end]]
     local data_audio = string.match(html, 'data%-audio="([^"]+)"')
     if data_audio then
       data_audio = string.gsub(data_audio, "&quot;", '"')
